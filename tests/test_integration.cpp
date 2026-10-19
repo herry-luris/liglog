@@ -20,16 +20,16 @@ TEST(IntegrationTest, EndToEndFileLogging) {
 
     auto cfg = lig::config();
     cfg.level(lig::Level::Trace)
-        .create_entry_config()
-        .kind(lig::backend::TransportKind::Sync)
+        .transport()
+        .kind(lig::interface::ITransport::Kind::Sync)
         .max_cache_size(16 * 1024)
-        .create_text_formatter_config()
+        .text_formatter()
         .timestamp(true)
         .function_name(true)
         .location(true)
         .thread_id(true)
         .submit()
-        .create_file_sink_config()
+        .file_sink()
         .filename(tmp / "app.log")
         .dir(tmp)
         .sync_interval(1)
@@ -47,8 +47,8 @@ TEST(IntegrationTest, EndToEndFileLogging) {
     lig::Fatal{}("fatal {}", 6);
 
     // 显式 flush
-    lig::logger::getBackend<lig::backend::InnerBackend>().flush();
-    lig::logger::getBackend<lig::backend::InnerBackend>().stop();
+    lig::logger::getBackend<lig::InnerBackend>().flush();
+    lig::logger::getBackend<lig::InnerBackend>().stop();
 
     // 扫所有日志文件，拼接内容
     std::string all;
@@ -78,21 +78,19 @@ TEST(IntegrationTest, LoggerPlusSyncTransportPlusMemorySink) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::SyncTransport transport;
+    lig::component::SyncTransport transport;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     transport.set_formatter(fmt);
     transport.add_sink(sink);
     transport.flush();
 
-    lig::logger::Info<lig::backend::SyncTransport> info;
+    lig::logger::Info<lig::component::SyncTransport> info;
     // 注意：Info<BE> 内部调用 getBackend<BE>()，这里 BE 是 SyncTransport，
     // 而 SyncTransport 不是 backend 类型，无法工作。用 InnerBackend 系列别名或自定义 BE。
     // 改用 InnerBackend 作为 BE，再手工注入 transport 更复杂，这里用最简方式：
     struct LocalBackend {
-        lig::backend::SyncTransport *t{};
-        void submit_impl(lig::logger::Task &&task) {
-            t->from(task);
-        }
+        lig::component::SyncTransport *t{};
+        void submit_impl(lig::logger::Task &&task) { t->from(task); }
     };
 
     // 直接走 backend 方式
@@ -113,7 +111,7 @@ TEST(IntegrationTest, MultiThreadedAsyncTransport) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -142,7 +140,7 @@ TEST(IntegrationTest, EdgeCases) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::SyncTransport t;
+    lig::component::SyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -157,7 +155,7 @@ TEST(IntegrationTest, EdgeCases) {
 // ---------- 集成性能 ----------
 TEST(IntegrationPerformance, SyncEndToEnd) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
-    lig::backend::SyncTransport t;
+    lig::component::SyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -174,7 +172,7 @@ TEST(IntegrationPerformance, SyncEndToEnd) {
 
 TEST(IntegrationPerformance, AsyncEndToEnd) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
-    lig::backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);

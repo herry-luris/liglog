@@ -1,8 +1,6 @@
 #pragma once
 #include <atomic>
 #include <chrono>
-#include <memory>
-#include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -56,21 +54,19 @@ class NullFormatter final : public lig::interface::Formatter {
 
 // 生成一个可提交到 backend 的 Task，body 会被 formatter 消费
 inline lig::logger::Task make_task(std::string body) {
-    lig::logger::Task task(
-        [body = std::move(body)](const lig::interface::Formatter *f) -> std::vector<std::byte> {
-            lig::LogEntry entry;
-            entry.head.level = lig::Level::Info;
-            entry.head.line = 0;
-            entry.head.thread_id = 0;
-            entry.head.filename = "test.cpp";
-            entry.head.funcname = "test_func";
-            entry.head.now =
-                std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
-            entry.body = body;
-            std::vector<std::byte> buf;
-            f->format(entry, buf);
-            return buf;
-        });
+    lig::logger::Task task([body = std::move(body)](const lig::interface::Formatter *f,
+                                                    std::vector<std::byte> &buf) -> void {
+        lig::LogEntry entry;
+        entry.head.level = lig::Level::Info;
+        entry.head.line = 0;
+        entry.head.thread_id = 0;
+        entry.head.filename = "test.cpp";
+        entry.head.funcname = "test_func";
+        entry.head.now =
+            std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
+        entry.body = body;
+        f->format(entry, buf);
+    });
     return task;
 }
 

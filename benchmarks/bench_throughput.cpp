@@ -5,7 +5,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -13,9 +12,6 @@
 #include <thread>
 #include <vector>
 
-#include "backend.hpp"
-#include "component.hpp"
-#include "interface.hpp"
 #include "lig.hpp"
 #include "logger.hpp"
 
@@ -84,7 +80,7 @@ double measure_throughput(int threads, ThreadFunc &&thread_fn, FlushFunc &&flush
 
 void setup_liglog() {
     lig::logger::g_level.store(lig::Level::Trace, std::memory_order_relaxed);
-    auto &be = lig::logger::getBackend<lig::backend::InnerBackend>();
+    auto &be = lig::logger::getBackend<lig::InnerBackend>();
 
     std::vector<std::unique_ptr<lig::interface::Sink>> sinks;
     sinks.push_back(std::make_unique<LigNullSink>());
@@ -93,12 +89,12 @@ void setup_liglog() {
     fmt_owner->status.setTimeStamp(false).setThreadId(false).setFuncname(false).setLocation(false);
     std::unique_ptr<const lig::interface::Formatter> fmt = std::move(fmt_owner);
 
-    be.add_entity(lig::backend::TransportKind::Async, fmt, sinks, kQueueSize);
+    be.add_entity(lig::interface::ITransport::Kind::Async, fmt, sinks, kQueueSize);
     be.start();
 }
 
 void flush_liglog() {
-    lig::logger::getBackend<lig::backend::InnerBackend>().flush();
+    lig::logger::getBackend<lig::InnerBackend>().flush();
 }
 
 // ---------------- spdlog ----------------

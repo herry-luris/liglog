@@ -4,21 +4,18 @@
 #include <thread>
 #include <vector>
 
-#include "backend.hpp"
-#include "interface.hpp"
+#include "lig.hpp"
 #include "test_helpers.hpp"
-
-using lig::backend::TransportKind;
 
 // ---------- DataBuffer ----------
 TEST(DataBufferTest, DefaultState) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     EXPECT_EQ(buf.len(), 0u);
-    EXPECT_GE(buf.batchSize(), lig::backend::internal::DataBuffer::MinBatchSize);
-    EXPECT_LE(buf.batchSize(), lig::backend::internal::DataBuffer::MaxBatchSize);
+    EXPECT_GE(buf.batchSize(), lig::component::internal::DataBuffer::MinBatchSize);
+    EXPECT_LE(buf.batchSize(), lig::component::internal::DataBuffer::MaxBatchSize);
 }
 TEST(DataBufferTest, PushSmallKeepsInBuffer) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     std::vector<std::byte> data(100, std::byte{0xAB});
     auto out = buf.push(data.data(), data.size());
     EXPECT_TRUE(out.empty());
@@ -26,7 +23,7 @@ TEST(DataBufferTest, PushSmallKeepsInBuffer) {
 }
 
 TEST(DataBufferTest, PushExactlyBatchSizeEmitsOne) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     ASSERT_TRUE(buf.setBatchSize(1024));
     std::vector<std::byte> data(1024, std::byte{0xCD});
     auto out = buf.push(data.data(), data.size());
@@ -36,7 +33,7 @@ TEST(DataBufferTest, PushExactlyBatchSizeEmitsOne) {
 }
 
 TEST(DataBufferTest, PushMultiBatch) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     ASSERT_TRUE(buf.setBatchSize(1024));
     std::vector<std::byte> data(3000, std::byte{0xEE});
     auto out = buf.push(data.data(), data.size());
@@ -45,13 +42,13 @@ TEST(DataBufferTest, PushMultiBatch) {
 }
 
 TEST(DataBufferTest, FlushBelowMinReturnsNullopt) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     auto r = buf.flush();
     EXPECT_FALSE(r.has_value());
 }
 
 TEST(DataBufferTest, FlushMovesOwnership) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     std::vector<std::byte> data(64, std::byte{0x11});
     buf.push(data.data(), data.size());
     auto r = buf.flush();
@@ -61,16 +58,16 @@ TEST(DataBufferTest, FlushMovesOwnership) {
 }
 
 TEST(DataBufferTest, SetBatchSizeRejectsInvalid) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     EXPECT_FALSE(buf.setBatchSize(0));
-    EXPECT_FALSE(buf.setBatchSize(lig::backend::internal::DataBuffer::MaxBatchSize + 1));
+    EXPECT_FALSE(buf.setBatchSize(lig::component::internal::DataBuffer::MaxBatchSize + 1));
 }
 
 // ---------- SinkWrapper ----------
 TEST(SinkWrapperTest, ForwardsToSink) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = sink.get();
-    lig::backend::internal::SinkWrapper wrapper{sink};
+    lig::component::internal::SinkWrapper wrapper{sink};
 
     std::vector<std::byte> data = {std::byte{'h'}, std::byte{'i'}};
     wrapper.from(data);
@@ -80,7 +77,7 @@ TEST(SinkWrapperTest, ForwardsToSink) {
 TEST(SinkWrapperTest, EmptyDataDoesNothing) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = sink.get();
-    lig::backend::internal::SinkWrapper wrapper{sink};
+    lig::component::internal::SinkWrapper wrapper{sink};
 
     std::vector<std::byte> data;
     wrapper.from(data);
@@ -91,7 +88,7 @@ TEST(SinkWrapperTest, StoresFailDataOnError) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
     raw->fail_writes.store(true);
-    lig::backend::internal::SinkWrapper wrapper{sink};
+    lig::component::internal::SinkWrapper wrapper{sink};
 
     std::vector<std::byte> data = {std::byte{'a'}, std::byte{'b'}};
     wrapper.from(data);
@@ -105,7 +102,7 @@ TEST(SinkWrapperTest, StoresFailDataOnError) {
 }
 
 // ---------- SyncTransport ----------
-using SyncTransport = lig::backend::SyncTransport;
+using SyncTransport = lig::component::SyncTransport;
 namespace {
 void reset_sync(SyncTransport &t) {
     // 清理 thread_local 缓存
@@ -117,7 +114,7 @@ TEST(SyncTransportTest, WriteAndFlush) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::SyncTransport t;
+    lig::component::SyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -131,10 +128,10 @@ TEST(SyncTransportTest, WriteAndFlush) {
 }
 
 TEST(SyncTransportTest, SetMaxCacheSizeRejectsInvalid) {
-    lig::backend::SyncTransport t;
+    lig::component::SyncTransport t;
     EXPECT_FALSE(t.set_max_cache_size(0));
-    EXPECT_FALSE(t.set_max_cache_size(lig::backend::SyncTransport::MaxCacheSize + 1));
-    EXPECT_TRUE(t.set_max_cache_size(lig::backend::SyncTransport::MinCacheSize));
+    EXPECT_FALSE(t.set_max_cache_size(lig::component::SyncTransport::MaxCacheSize + 1));
+    EXPECT_TRUE(t.set_max_cache_size(lig::component::SyncTransport::MinCacheSize));
 }
 
 // ---------- AsyncTransport ----------
@@ -142,7 +139,7 @@ TEST(AsyncTransportTest, WriteAndFlush) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -158,7 +155,7 @@ TEST(AsyncTransportTest, WriteAndFlush) {
 
 TEST(AsyncTransportTest, FlushOnEmptyIsSafe) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
-    lig::backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -173,7 +170,7 @@ TEST(AsyncTransportTest, MultipleProducers) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -202,46 +199,48 @@ TEST(TransportTest, SyncDispatch) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::Transport t{TransportKind::Sync};
+    std::unique_ptr<lig::interface::ITransport> t{
+        std::make_unique<lig::component::SyncTransport>()};
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
-    t.set_formatter(fmt);
-    t.add_sink(sink);
-    t.start();
-    t.from(lig_test::make_task("s"));
-    t.flush();
+    t->set_formatter(fmt);
+    t->add_sink(sink);
+    t->start();
+    t->from(lig_test::make_task("s"));
+    t->flush();
     EXPECT_EQ(raw->str(), "s");
-    t.stop();
+    t->stop();
 }
 
 TEST(TransportTest, AsyncDispatch) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
     auto *raw = static_cast<lig_test::MemorySink *>(sink.get());
 
-    lig::backend::Transport t{TransportKind::Async};
+    std::unique_ptr<lig::interface::ITransport> t{
+        std::make_unique<lig::component::AsyncTransport>()};
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
-    t.set_formatter(fmt);
-    t.add_sink(sink);
-    t.start();
-    t.from(lig_test::make_task("a"));
-    t.flush();
+    t->set_formatter(fmt);
+    t->add_sink(sink);
+    t->start();
+    t->from(lig_test::make_task("a"));
+    t->flush();
     EXPECT_EQ(raw->str(), "a");
-    t.stop();
+    t->stop();
 }
 
 // ---------- InnerBackend ----------
 TEST(InnerBackendTest, RejectAddEntityAfterStart) {
-    lig::backend::InnerBackend backend;
-    backend.start();
+    lig::InnerBackend component;
+    component.start();
     auto sink = std::make_unique<lig_test::MemorySink>();
     std::vector<std::unique_ptr<lig::interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
-    EXPECT_FALSE(backend.add_entity(TransportKind::Sync, fmt, sinks, 0));
+    EXPECT_FALSE(component.add_entity(lig::interface::ITransport::Kind::Sync, fmt, sinks, 0));
 }
 
 // ---------- 后端基础性能 ----------
 TEST(BackendPerformance, DataBufferPushThroughput) {
-    lig::backend::internal::DataBuffer buf;
+    lig::component::internal::DataBuffer buf;
     const std::vector<std::byte> chunk(128, std::byte{0x42});
     constexpr size_t iters = 200000;
 
@@ -253,7 +252,7 @@ TEST(BackendPerformance, DataBufferPushThroughput) {
 
 TEST(BackendPerformance, SyncTransportThroughput) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
-    lig::backend::SyncTransport t;
+    lig::component::SyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -271,7 +270,7 @@ TEST(BackendPerformance, SyncTransportThroughput) {
 
 TEST(BackendPerformance, AsyncTransportThroughput) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
-    lig::backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);
@@ -291,7 +290,7 @@ TEST(BackendPerformance, AsyncTransportThroughput) {
 TEST(BackendPerformance, AsyncTransportDrainLatency) {
     // 测 flush 的端到端延迟
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_test::MemorySink>();
-    lig::backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const lig::interface::Formatter> fmt{new lig_test::NullFormatter{}};
     t.set_formatter(fmt);
     t.add_sink(sink);

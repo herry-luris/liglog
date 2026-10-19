@@ -277,7 +277,6 @@ BENCHMARK(BM_Spdlog_MultiThread_Sync)
 // ============================================================
 
 // 5.1 纯 pattern_formatter（full pattern）
-// 5.1 纯 pattern_formatter（full pattern）
 static void BM_Spdlog_TextFormatter_Full(benchmark::State &state) {
     auto formatter = std::make_unique<spdlog::pattern_formatter>(kFullPattern);
     spdlog::memory_buf_t dest;
@@ -344,6 +343,28 @@ static void BM_Spdlog_MixedWorkload(benchmark::State &state) {
 BENCHMARK(BM_Spdlog_MixedWorkload)->Unit(benchmark::kNanosecond);
 
 // ============================================================
-// Google Benchmark 入口
+// 入口点
+//
+// 不用 BENCHMARK_MAIN()，因为它在 benchmark 跑完后直接 return 0，
+// 全局静态对象（含 spdlog::thread_pool 单例）会在 atexit 阶段被析构。
+// 此时 Windows 上 condition_variable 的唤醒可能被丢弃，导致工作线程永远
+// 醒不过来，join 卡死。
+//
+// 改成显式 main：先 benchmark::Shutdown()，再 spdlog::shutdown()，
+// 主动 join 线程池，避免走全局析构路径。
 // ============================================================
-BENCHMARK_MAIN();
+int main(int argc, char **argv) {
+    benchmark::Initialize(&argc, argv);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv)) {
+        spdlog::shutdown();
+        return 1;
+    }
+
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+
+    // 显式关闭 spdlog 全局线程池，避免在 atexit 阶段死锁
+    spdlog::shutdown();
+
+    return 0;
+}
