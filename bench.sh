@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-BUILD=build-bench
+BUILD=build
 OUT=results
 mkdir -p $OUT
 
@@ -12,12 +12,12 @@ SPD_SCENES="BM_Spdlog_FrontendSuppressed|BM_Spdlog_FrontendEnabled_NoArgs|BM_Spd
 
 rm -rf /tmp/lig_bench /tmp/spdlog_bench
 
-./$BUILD/bench/bench_liglog \
+./$BUILD/benchmarks/bench_liglog \
     --benchmark_filter="$LIG_SCENES" \
     --benchmark_out=$OUT/liglog.json \
     --benchmark_out_format=json
 
-./$BUILD/bench/bench_spdlog \
+./$BUILD/benchmarks/bench_spdlog \
     --benchmark_filter="$SPD_SCENES" \
     --benchmark_out=$OUT/spdlog.json \
     --benchmark_out_format=json

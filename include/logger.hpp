@@ -2,20 +2,28 @@
 #define LIGLOG_INCLUDE_LOGGER_HPP
 #include <chrono>
 #include <cstddef>
+#include <vector>
 #pragma once
 
 #include "interface.hpp"
+#include <atomic>
 #include <source_location>
 #include <string>
 #include <utility>
-#include <atomic>
 #if defined(_WIN32)
-#include <processthreadapi.h>
+#include <processthreadsapi.h>
 #else
 #include <pthread.h>
 #endif
 
 namespace lig::logger {
+
+// LIG_LOGGER_LEVEL == 0 support dynamic level
+// LIG_LOGGER_LEVEL == 1 support dynamic level(bigger than Info)
+// LIG_LOGGER_LEVEL == 2 support dynamic level(bigger than Warn)
+#ifndef LIG_LOGGER_LEVEL
+#define LIG_LOGGER_LEVEL 0
+#endif
 
 inline std::atomic<::lig::Level> g_level{};
 inline auto getThreadId() -> uint64_t {
@@ -54,9 +62,14 @@ struct Task {
     }
     ~Task() { reset(); }
 
-    template <typename F, typename = std::enable_if_t<
-                              !std::is_same_v<std::decay_t<F>, Task> &&
-                              std::is_invocable_v<std::decay_t<F>, const interface::Formatter *>>>
+    template <
+        typename F,
+        typename = std::enable_if_t<
+            !std::is_same_v<std::decay_t<F>, Task> &&
+            std::is_invocable_v<std::decay_t<F>, const interface::Formatter *,
+                                std::vector<std::byte> &> &&
+            std::is_same_v<void, std::invoke_result_t<std::decay_t<F>, const interface::Formatter *,
+                                                      std::vector<std::byte> &>>>>
     Task(F &&func) {
         using T = std::decay_t<F>;
         if constexpr (sizeof(T) <= InlineSize && alignof(T) <= alignof(std::max_align_t)) {
@@ -71,13 +84,13 @@ struct Task {
     }
 
     explicit operator bool() const noexcept { return vtable_; }
-    auto operator()(const interface::Formatter *formatter) const -> std::vector<std::byte> {
-        return vtable_->invoke(ptr(), formatter);
+    void operator()(const interface::Formatter *formatter, std::vector<std::byte> &data) const {
+        vtable_->invoke(ptr(), formatter, data);
     }
 
   private:
     struct VTable {
-        auto (*invoke)(const void *, const interface::Formatter *) -> std::vector<std::byte>;
+        void (*invoke)(const void *, const interface::Formatter *, std::vector<std::byte> &);
         void (*destroy)(void *) noexcept;
         void (*move)(void *dst, void *src) noexcept;
         void (*copy)(void *dst, const void *src);
@@ -147,8 +160,8 @@ struct Task {
 
 template <typename T>
 const Task::VTable Task::VirtualTable{
-    [](const void *p, const interface::Formatter *f) -> std::vector<std::byte> {
-        return (*static_cast<const T *>(p))(f);
+    [](const void *p, const interface::Formatter *f, std::vector<std::byte> &data) -> void {
+        (*static_cast<const T *>(p))(f, data);
     },
     [](void *p) noexcept -> void { static_cast<T *>(p)->~T(); },
     [](void *dst, void *src) noexcept -> void {
@@ -162,45 +175,16 @@ const Task::VTable Task::VirtualTable{
     },
 };
 
-// struct Task {
-//     struct Base {
-//         virtual auto operator()(const interface::Formatter *formatter) const
-//             -> std::vector<std::byte> = 0;
-//         virtual ~Base() = default;
-//     };
-//
-//     template <typename F> struct Func final : public Base {
-//         Func(F &&func) : f_{std::move(func)} {}
-//         auto operator()(const interface::Formatter *formatter) const
-//             -> std::vector<std::byte> final {
-//             return f_(formatter);
-//         }
-//         ~Func() final = default;
-//
-//       private:
-//         F f_{};
-//     };
-//
-//     Task(const Task &) = delete;
-//     auto operator=(const Task &) -> Task & = delete;
-//     Task(Task &&) noexcept = default;
-//     auto operator=(Task &&) noexcept -> Task & = default;
-//
-//     template <typename F>
-//     Task(F &&func) : ptr_{std::make_unique<Func<std::decay_t<F>>>(std::move(func))} {}
-//     auto operator()(const ::lig::interface::Formatter *formatter) const -> std::vector<std::byte>
-//     {
-//         return (*ptr_.get())(formatter);
-//     }
-//
-//   private:
-//     std::unique_ptr<Base> ptr_{};
-// };
-
 template <Level L, typename BE> class Log {
   public:
     template <typename... Args>
     void operator()(const std::format_string<Args...> &format, Args &&...args) {
+        if constexpr ((LIG_LOGGER_LEVEL == 1 &&
+                       static_cast<uint8_t>(L) < static_cast<uint8_t>(Level::Info)) ||
+                      (LIG_LOGGER_LEVEL == 2 &&
+                       static_cast<uint8_t>(L) < static_cast<uint8_t>(Level::Warn))) {
+            return;
+        }
         if (static_cast<uint8_t>(g_level.load(std::memory_order_relaxed)) >
             static_cast<uint8_t>(L)) {
             return;
@@ -213,9 +197,10 @@ template <Level L, typename BE> class Log {
             .filename = loc_.file_name(),
             .funcname = loc_.function_name(),
             .now = std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now())};
-        Task task = [info = info, fmt = std::string_view{format.get()},
-                     ... args = std::forward<Args>(args)](
-                        const ::lig::interface::Formatter *formatter) -> std::vector<std::byte> {
+        Task task = [info = info, fmt = std::string_view(format.get()),
+                     ... args =
+                         std::forward<Args>(args)](const ::lig::interface::Formatter *formatter,
+                                                   std::vector<std::byte> &data) -> void {
             constexpr size_t len = sizeof...(Args);
             thread_local LogEntry entry{};
             entry.head = info;
@@ -223,14 +208,10 @@ template <Level L, typename BE> class Log {
             if constexpr (len == 0) {
                 entry.body.append(fmt);
             } else {
-                std::vformat_to(std::back_inserter(entry.body), fmt,
+                std::vformat_to(std::back_inserter(entry.body), fmt.data(),
                                 std::make_format_args(args...));
             }
-            std::vector<std::byte> vec{};
-            vec.clear();
-            formatter->format(entry, vec);
-
-            return vec;
+            formatter->format(entry, data);
         };
         getBackend<BE>().submit(std::move(task));
     }

@@ -4,7 +4,8 @@
 #include <fstream>
 #include <string>
 
-#include "component.hpp"
+#include "component/sink.hpp"
+#include "component/formatter.hpp"
 #include "interface.hpp"
 #include "test_helpers.hpp"
 

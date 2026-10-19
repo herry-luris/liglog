@@ -24,7 +24,8 @@ struct ExecutingBackend : lig::interface::IBackend<ExecutingBackend> {
 
     void submit_impl(lig::logger::Task &&task) {
         static lig_test::NullFormatter fmt;
-        auto bytes = task(&fmt);
+        std::vector<std::byte> bytes{};
+        task(&fmt, bytes);
         std::lock_guard lk{mtx};
         outputs.emplace_back(reinterpret_cast<const char *>(bytes.data()), bytes.size());
     }

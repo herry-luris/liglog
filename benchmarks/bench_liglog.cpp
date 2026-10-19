@@ -5,14 +5,9 @@
 #include <filesystem>
 #include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "backend.hpp"
 #include "bench_common.hpp"
-#include "component.hpp"
-#include "interface.hpp"
-#include "logger.hpp"
 #include "lig.hpp"
 
 namespace fs = std::filesystem;
@@ -56,12 +51,12 @@ BENCHMARK(BM_FrontendSuppressed)->Unit(benchmark::kNanosecond);
 // 1.2 启用，无参数
 static void BM_FrontendEnabled_NoArgs(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Sync, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
     be.start();
 
     Info log;
@@ -78,12 +73,12 @@ BENCHMARK(BM_FrontendEnabled_NoArgs)->Unit(benchmark::kNanosecond);
 // 1.3 启用，单 int 参数
 static void BM_FrontendEnabled_IntArg(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Sync, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
     be.start();
 
     Info log;
@@ -100,12 +95,12 @@ BENCHMARK(BM_FrontendEnabled_IntArg)->Unit(benchmark::kNanosecond);
 // 1.4 启用，混合参数（int + double + string）
 static void BM_FrontendEnabled_MixedArgs(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Sync, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
     be.start();
 
     const std::string name = "user_id";
@@ -127,20 +122,19 @@ BENCHMARK(BM_FrontendEnabled_MixedArgs)->Unit(benchmark::kNanosecond);
 // 2.1 SyncTransport::from
 static void BM_SyncTransportFrom(benchmark::State &state) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_bench::NullSink>();
-    backend::SyncTransport t;
+    lig::component::SyncTransport t;
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     t.set_formatter(fmt);
     t.add_sink(sink);
     t.flush();
 
     auto make_task = [](std::string body) -> logger::Task {
-        return ([body = std::move(body)](const interface::Formatter *f) -> std::vector<std::byte> {
+        return ([body = std::move(body)](const interface::Formatter *f,
+                                         std::vector<std::byte> &vec) -> void {
             LogEntry entry;
             entry.head.level = Level::Info;
             entry.body = body;
-            std::vector<std::byte> buf;
-            f->format(entry, buf);
-            return buf;
+            f->format(entry, vec);
         });
     };
 
@@ -155,22 +149,20 @@ BENCHMARK(BM_SyncTransportFrom)->Unit(benchmark::kNanosecond);
 // 2.2 AsyncTransport::from
 static void BM_AsyncTransportFrom(benchmark::State &state) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_bench::NullSink>();
-    backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     t.set_formatter(fmt);
     t.add_sink(sink);
     t.start();
 
     auto make_task = [](std::string body) {
-        return logger::Task(
-            [body = std::move(body)](const interface::Formatter *f) -> std::vector<std::byte> {
-                LogEntry entry;
-                entry.head.level = Level::Info;
-                entry.body = body;
-                std::vector<std::byte> buf;
-                f->format(entry, buf);
-                return buf;
-            });
+        return logger::Task([body = std::move(body)](const interface::Formatter *f,
+                                                     std::vector<std::byte> &vec) -> void {
+            LogEntry entry;
+            entry.head.level = Level::Info;
+            entry.body = body;
+            f->format(entry, vec);
+        });
     };
 
     for (auto _ : state) {
@@ -185,22 +177,20 @@ BENCHMARK(BM_AsyncTransportFrom)->Unit(benchmark::kNanosecond);
 // 2.3 AsyncTransport 提交 + flush（每条一次 flush，测最坏情况延迟）
 static void BM_AsyncTransportFromFlush(benchmark::State &state) {
     std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_bench::NullSink>();
-    backend::AsyncTransport t;
+    lig::component::AsyncTransport t;
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     t.set_formatter(fmt);
     t.add_sink(sink);
     t.start();
 
     auto make_task = [](std::string body) {
-        return logger::Task(
-            [body = std::move(body)](const interface::Formatter *f) -> std::vector<std::byte> {
-                LogEntry entry;
-                entry.head.level = Level::Info;
-                entry.body = body;
-                std::vector<std::byte> buf;
-                f->format(entry, buf);
-                return buf;
-            });
+        return logger::Task([body = std::move(body)](const interface::Formatter *f,
+                                                     std::vector<std::byte> &vec) -> void {
+            LogEntry entry;
+            entry.head.level = Level::Info;
+            entry.body = body;
+            f->format(entry, vec);
+        });
     };
 
     for (auto _ : state) {
@@ -219,13 +209,13 @@ BENCHMARK(BM_AsyncTransportFromFlush)->Unit(benchmark::kNanosecond);
 // 3.1 Sync 端到端：Task 构造 → transport → Sink
 static void BM_EndToEnd_Sync_Minimal(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     auto *sink_raw = sink.get();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Sync, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
     be.start();
 
     Info log;
@@ -244,12 +234,12 @@ BENCHMARK(BM_EndToEnd_Sync_Minimal)->Unit(benchmark::kNanosecond);
 // 3.2 Async 端到端
 static void BM_EndToEnd_Async(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Async, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Async, fmt, sinks, 16 * 1024);
     be.start();
 
     Info log;
@@ -266,7 +256,7 @@ BENCHMARK(BM_EndToEnd_Async)->Unit(benchmark::kNanosecond);
 // 3.3 完整 TextFormatter + 文件落地
 static void BM_EndToEnd_Sync_FileFull(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
 
     auto cfg = component::FileSink::Config{};
     cfg.dir = fs::temp_directory_path() / "lig_bench";
@@ -279,7 +269,7 @@ static void BM_EndToEnd_Sync_FileFull(benchmark::State &state) {
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_full_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Sync, fmt, sinks, 64 * 1024);
+    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 64 * 1024);
     be.start();
 
     Info log;
@@ -300,12 +290,12 @@ BENCHMARK(BM_EndToEnd_Sync_FileFull)->Unit(benchmark::kNanosecond);
 // 4.1 Async 多线程提交
 static void BM_MultiThread_Async(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Async, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Async, fmt, sinks, 16 * 1024);
     be.start();
 
     for (auto _ : state) {
@@ -327,12 +317,12 @@ BENCHMARK(BM_MultiThread_Async)
 // 4.2 Sync 多线程提交
 static void BM_MultiThread_Sync(benchmark::State &state) {
     logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Sync, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
     be.start();
 
     for (auto _ : state) {
@@ -399,7 +389,7 @@ BENCHMARK(BM_TextFormatter_Minimal)->Unit(benchmark::kNanosecond);
 
 // 5.3 DataBuffer::push
 static void BM_DataBufferPush(benchmark::State &state) {
-    backend::internal::DataBuffer buf;
+    component::internal::DataBuffer buf;
     std::vector<std::byte> chunk(128, std::byte{0x42});
     for (auto _ : state) {
         auto res = buf.push(chunk.data(), chunk.size());
@@ -438,12 +428,12 @@ BENCHMARK(BM_FileSink_Write)->Unit(benchmark::kNanosecond);
 // ============================================================
 static void BM_MixedWorkload(benchmark::State &state) {
     logger::g_level.store(Level::Info, std::memory_order_relaxed);
-    auto &be = logger::getBackend<backend::InnerBackend>();
+    auto &be = logger::getBackend<InnerBackend>();
     auto sink = std::make_unique<lig_bench::NullSink>();
     std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
     std::vector<std::unique_ptr<interface::Sink>> sinks;
     sinks.push_back(std::move(sink));
-    be.add_entity(backend::TransportKind::Async, fmt, sinks, 16 * 1024);
+    be.add_entity(interface::ITransport::Kind::Async, fmt, sinks, 16 * 1024);
     be.start();
 
     Trace trace; // 被过滤

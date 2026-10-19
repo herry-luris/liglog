@@ -1,16 +1,7 @@
-#include "../include/backend.hpp"
-#include "interface.hpp"
-#include "logger.hpp"
-#include <atomic>
-#include <chrono>
-#include <memory>
-#include <mutex>
-#include <sys/types.h>
-#include <thread>
-#include <vector>
-#include <iostream>
+#include "component/transport.hpp"
+#include <span>
 
-namespace lig::backend {
+namespace lig::component {
 
 namespace internal {
 
@@ -135,6 +126,12 @@ void SinkWrapper::store_fail_data(const std::span<const std::byte> &data) {
     fail_data.insert(fail_data.end(), data.begin() + offset, data.end());
 }
 } // namespace internal
+
+
+
+
+// ITransport
+
 // transport
 // ---sync transport
 
@@ -152,19 +149,10 @@ void SyncTransport::from(const ::lig::logger::Task &task) {
     std::shared_ptr<Entity> entity = find_entity();
     auto &cache = entity->cache;
 
-    std::vector<std::byte> datas = task(formatter_.get());
-    if (max_cache_size_ > cache.capacity()) {
-        cache.reserve(max_cache_size_);
-    }
-    size_t offset = 0, data_len = datas.size();
-    while (cache.capacity() < cache.size() + data_len) {
-        const size_t left = cache.capacity() - cache.size();
-        cache.insert(cache.end(), datas.begin() + offset, datas.begin() + offset + left);
+    task(formatter_.get(), cache);
+    if (cache.size() > max_cache_size_) {
         flush();
-        offset += left;
-        data_len -= left;
     }
-    cache.insert(cache.end(), datas.begin() + offset, datas.end());
 }
 void SyncTransport::flush() {
     std::shared_ptr<Entity> entity = find_entity();
@@ -208,6 +196,7 @@ void AsyncTransport::start() {
         for (auto &wrapper : wrappers_) {
             wrapper->open();
         }
+        std::vector<std::byte> tmp_data{};
         while (!is_stop_.load(std::memory_order_relaxed)) {
             const size_t max_cache_size = max_cache_size_.load(std::memory_order_acquire);
             if (cache_.capacity() < max_cache_size) {
@@ -226,7 +215,9 @@ void AsyncTransport::start() {
                     flush_notifier_.fetch_add(1, std::memory_order_release);
                     flush_notifier_.notify_one();
                 } else {
-                    push(task(formatter_.get()));
+                    tmp_data.clear();
+                    task(formatter_.get(), tmp_data);
+                    push(tmp_data);
                 }
             }
             // std::cout << "pop\n" << std::flush;
@@ -239,7 +230,9 @@ void AsyncTransport::start() {
         auto res{task_queue_.try_pop_till_empty()};
         for (auto &task : res) {
             if (task) {
-                push(task(formatter_.get()));
+                tmp_data.clear();
+                task(formatter_.get(), tmp_data);
+                push(tmp_data);
             }
         }
         if (is_overflow_.exchange(false, std::memory_order_relaxed)) {
@@ -259,11 +252,13 @@ void AsyncTransport::start() {
 }
 void AsyncTransport::from(const ::lig::logger::Task &task) {
     const auto now = std::chrono::steady_clock::now();
-    while (!task_queue_.try_push(task)) {
+    while (!task_queue_.try_push(task) && task) {
         if (std::chrono::steady_clock::now() - now > std::chrono::milliseconds(3)) {
-            auto res = task(formatter_.get());
+            std::vector<std::byte> tmp{};
+            tmp.reserve(512);
+            task(formatter_.get(), tmp);
             std::lock_guard guard{overflow_mutex_};
-            overflow_data_.insert(overflow_data_.end(), res.begin(), res.end());
+            overflow_data_.insert(overflow_data_.end(), tmp.begin(), tmp.end());
             is_overflow_.store(true, std::memory_order_release);
             break;
         }
@@ -326,96 +321,5 @@ void AsyncTransport::cache_flush() {
         cache_.clear();
     }
 }
-// Transport
-Transport::Transport(TransportKind kind) : kind_{kind} {
-    if (kind_ == TransportKind::Async) {
-        value_.emplace<AsyncTransport>();
-    } else {
-        value_.emplace<SyncTransport>();
-    }
-}
-void Transport::stop() {
-    if (kind_ == TransportKind::Async) {
-        std::get<AsyncTransport>(value_).stop();
-    } else {
-        std::get<SyncTransport>(value_).stop();
-    }
-}
-void Transport::flush() {
-    if (kind_ == TransportKind::Async) {
-        std::get<AsyncTransport>(value_).flush();
-    } else {
-        std::get<SyncTransport>(value_).flush();
-    }
-}
-void Transport::start() {
-    if (kind_ == TransportKind::Async) {
-        std::get<AsyncTransport>(value_).start();
-    }
-}
-void Transport::from(const ::lig::logger::Task &task) {
-    if (kind_ == TransportKind::Async) {
-        std::get<AsyncTransport>(value_).from(task);
-    } else {
-        std::get<SyncTransport>(value_).from(task);
-    }
-}
 
-void Transport::set_formatter(std::unique_ptr<const ::lig::interface::Formatter> &formatter) {
-    if (kind_ == TransportKind::Async) {
-        std::get<AsyncTransport>(value_).set_formatter(formatter);
-    } else {
-        std::get<SyncTransport>(value_).set_formatter(formatter);
-    }
-}
-void Transport::set_max_cache_size(size_t max_cache_sizes) {
-    if (kind_ == TransportKind::Async) {
-        std::get<AsyncTransport>(value_).set_max_cache_size(max_cache_sizes);
-    } else {
-        std::get<SyncTransport>(value_).set_max_cache_size(max_cache_sizes);
-    }
-}
-void Transport::add_sink(std::unique_ptr<::lig::interface::Sink> &sink) {
-    if (kind_ == TransportKind::Async) {
-        std::get<AsyncTransport>(value_).add_sink(sink);
-    } else {
-        std::get<SyncTransport>(value_).add_sink(sink);
-    }
-}
-
-void InnerBackend::start() {
-    if (is_start.exchange(true, std::memory_order_acq_rel)) {
-        return;
-    }
-    for (auto &t : transports_) {
-        t->start();
-    }
-}
-void InnerBackend::flush() {
-    for (auto &t : transports_) {
-        t->flush();
-    }
-}
-void InnerBackend::stop() {
-    for (auto &t : transports_) {
-        t->stop();
-    }
-}
-InnerBackend::~InnerBackend() { stop(); }
-auto InnerBackend::add_entity(TransportKind kind,
-                              std::unique_ptr<const ::lig::interface::Formatter> &formatter,
-                              std::vector<std::unique_ptr<::lig::interface::Sink>> &sinks,
-                              size_t max_cache_sizes) -> bool {
-    if (is_start.load(std::memory_order_acquire)) {
-        return false;
-    }
-    auto t = std::make_unique<Transport>(kind);
-    t->set_formatter(formatter);
-    t->set_max_cache_size(max_cache_sizes);
-    for (auto &sink : sinks) {
-        t->add_sink(sink);
-    }
-    transports_.push_back(std::move(t));
-    return true;
-}
-} // namespace lig::backend
+} // namespace lig::component

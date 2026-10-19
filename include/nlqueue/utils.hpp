@@ -1,9 +1,4 @@
 #pragma once
-#if defined(_WIN32)
-#include <processthreadapi.h>
-#else
-#include <pthread.h>
-#endif
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>

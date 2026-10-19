@@ -1,13 +1,9 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
-#include <mutex>
-#include <string>
-#include <system_error>
-#include <vector>
 
+#include "component/formatter.hpp"
 #include "interface.hpp"
-#include "component.hpp"
 
 namespace lig_bench {
 

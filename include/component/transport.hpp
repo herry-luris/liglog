@@ -1,25 +1,14 @@
 #pragma once
-#include "nlqueue/utils.hpp"
-#include <memory>
-#include <unistd.h>
-#include <vector>
-#ifndef LIG_BACKEND_CPP
-#define LIG_BACKEND_CPP
-
-#include <cstdint>
+#include "../logger.hpp"
+#include "../nlqueue/mpmc.hpp"
 #include <mutex>
-#include <atomic>
-#include <cstdlib>
-#include <cstddef>
-#include <variant>
-#include <optional>
+#include <thread>
 
-#include "logger.hpp"
-#include "nlqueue/mpmc.hpp"
+namespace lig::component {
 
-namespace lig::backend {
-
+// internal
 namespace internal {
+
 struct Data {
     Data() = default;
     Data(std::byte *data, size_t size);
@@ -81,7 +70,8 @@ class SinkWrapper {
 };
 
 } // namespace internal
-class SyncTransport {
+
+class SyncTransport final : public ::lig::interface::ITransport {
     struct Entity {
         std::vector<std::byte> cache;
         SyncTransport *instance;
@@ -92,14 +82,17 @@ class SyncTransport {
     constexpr static size_t MinCacheSize = 10 * 1024;
     constexpr static size_t MaxCacheSize = 64 * 1024;
     SyncTransport(size_t max_cache_size = 0);
+    ~SyncTransport() final = default;
 
-    // for SyncTransport, stop() do nothing, just for normalize to Transport
-    void stop() {}
-    void flush();
-    void from(const ::lig::logger::Task &);
-    void set_formatter(std::unique_ptr<const ::lig::interface::Formatter> &formatter);
-    void add_sink(std::unique_ptr<::lig::interface::Sink> &sink);
-    auto set_max_cache_size(size_t size) noexcept -> bool;
+    auto kind() -> Kind final { return Kind::Sync; };
+
+    void flush() final;
+    void from(const ::lig::logger::Task &) final;
+
+    void set_formatter(std::unique_ptr<const ::lig::interface::Formatter> &) final;
+    void add_sink(std::unique_ptr<::lig::interface::Sink> &) final;
+
+    auto set_max_cache_size(size_t size) noexcept -> bool final;
 
   private:
     size_t max_cache_size_{(MinCacheSize + MaxCacheSize) / 2};
@@ -109,7 +102,7 @@ class SyncTransport {
     auto find_entity() -> std::shared_ptr<Entity>;
 };
 
-class AsyncTransport {
+class AsyncTransport final : public ::lig::interface::ITransport {
     constexpr static size_t DataQueueSize = 1024;
     constexpr static size_t MaxTaskSize = 512;
     constexpr static size_t MinCacheSize = 10 * 1024;
@@ -119,20 +112,21 @@ class AsyncTransport {
     AsyncTransport() = default;
     ~AsyncTransport();
 
-    void stop();
-    void flush();
-    void start();
-    void from(const ::lig::logger::Task &);
+    auto kind() -> Kind final { return ITransport::Kind::Async; };
 
-    // set formatter before start
-    void set_formatter(std::unique_ptr<const ::lig::interface::Formatter> &formatter);
-    void add_sink(std::unique_ptr<::lig::interface::Sink> &sink);
-    auto set_max_cache_size(size_t size) noexcept -> bool;
+    void stop() final;
+    void flush() final;
+    void start() final;
+    void from(const ::lig::logger::Task &) final;
+
+    void set_formatter(std::unique_ptr<const ::lig::interface::Formatter> &formatter) final;
+    void add_sink(std::unique_ptr<::lig::interface::Sink> &sink) final;
+
+    auto set_max_cache_size(size_t size) noexcept -> bool final;
 
   private:
     internal::DataBuffer data_buffer_{};
     nlqueue::VyukovMpmc<::lig::logger::Task, MaxTaskSize, nlqueue::Strategy::Wait> task_queue_{};
-    // std::atomic_size_t write_notifier_{};
 
     std::vector<std::unique_ptr<internal::SinkWrapper>> wrappers_{};
     std::unique_ptr<const ::lig::interface::Formatter> formatter_{};
@@ -153,58 +147,4 @@ class AsyncTransport {
     void cache_flush();
 };
 
-enum struct TransportKind : uint8_t { Async, Sync };
-class Transport {
-  public:
-    using Type = std::variant<AsyncTransport, SyncTransport>;
-
-    Transport(TransportKind kind);
-    void stop();
-    void flush();
-    void start();
-    void from(const ::lig::logger::Task &);
-
-    // set formatter before start
-    void set_formatter(std::unique_ptr<const ::lig::interface::Formatter> &formatter);
-    void add_sink(std::unique_ptr<::lig::interface::Sink> &sink);
-    void set_max_cache_size(size_t max_cache_sizes);
-
-  private:
-    TransportKind kind_{TransportKind::Sync};
-    Type value_{};
-};
-
-struct TransportConfig {
-    TransportKind kind{};
-    std::unique_ptr<const ::lig::interface::Formatter> formatter{};
-    std::vector<std::unique_ptr<::lig::interface::Sink>> sinks{};
-    size_t max_cache_sizes{};
-};
-
-class InnerBackend : public ::lig::interface::IBackend<InnerBackend> {
-  public:
-    friend struct ::lig::interface::IBackend<InnerBackend>;
-
-    void start();
-    void flush();
-    void stop();
-    auto add_entity(TransportKind kind,
-                    std::unique_ptr<const ::lig::interface::Formatter> &formatter,
-                    std::vector<std::unique_ptr<::lig::interface::Sink>> &sinks,
-                    size_t max_cache_sizes = 0) -> bool;
-    ~InnerBackend();
-
-  private:
-    std::vector<std::unique_ptr<Transport>> transports_{};
-    std::atomic_bool is_start{false};
-
-    void submit_impl(::lig::logger::Task &&task) {
-        for (auto &t : transports_) {
-            t->from(task);
-        }
-    }
-};
-
-} // namespace lig::backend
-
-#endif
+} // namespace lig::component
