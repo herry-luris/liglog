@@ -1,7 +1,7 @@
-#ifndef LIGLOG_INCLUDE_LOGGER_HPP
-#define LIGLOG_INCLUDE_LOGGER_HPP
+#pragma once
 #include <chrono>
 #include <cstddef>
+#include <cassert>
 #include <vector>
 #pragma once
 
@@ -18,14 +18,22 @@
 
 namespace lig::logger {
 
-// LIG_LOGGER_LEVEL == 0 support dynamic level
-// LIG_LOGGER_LEVEL == 1 support dynamic level(bigger than Info)
-// LIG_LOGGER_LEVEL == 2 support dynamic level(bigger than Warn)
+/// LIG_LOGGER_LEVEL accelerates the front-end filter. When set to 1 or 2 at
+/// build time, the low-level `Log<>` instantiations are optimized away by
+/// `if constexpr`, so they cost nothing at runtime.
+///   0 = fully dynamic (all levels routed to `g_level` check)
+///   1 = drops levels below Info at compile time
+///   2 = drops levels below Warn at compile time
 #ifndef LIG_LOGGER_LEVEL
 #define LIG_LOGGER_LEVEL 0
 #endif
 
+/// Global minimum level. Messages whose level is numerically less than this
+/// are dropped at the front-end. Default 0 (Trace), i.e. everything passes.
 inline std::atomic<::lig::Level> g_level{};
+
+/// Platform thread id as an integer. `std::this_thread::get_id` is not
+/// directly formattable, so we expose the raw pthread/Windows id instead.
 inline auto getThreadId() -> uint64_t {
 #if defined(_WIN32)
     return static_cast<uint64_t>(::GetCurrentThreadId());
@@ -34,11 +42,25 @@ inline auto getThreadId() -> uint64_t {
 #endif
 }
 
+/// Returns the process-wide backend singleton for type `BE`. The instance is
+/// created on first use and lives until program exit. `BE` must derive from
+/// `lig::interface::IBackend<BE>`.
 template <typename BE> inline auto getBackend() -> BE & {
     static BE backend{};
     return backend;
 }
 
+/// Type-erased callable produced at the log call site. Holds the captured
+/// arguments and the pre-recorded `LogHead`. Invoking it formats the message
+/// and writes it to a byte buffer via a Formatter.
+///
+/// Small callables (<= 128 bytes and standard alignment) are stored inline;
+/// larger ones fall back to a heap `ControlBlock` with a reference count.
+/// This keeps the front-end cheap for the common case.
+///
+/// A default-constructed Task is empty and is used as a flush sentinel
+/// (e.g. by AsyncTransport). Calling an empty Task is an error and trips an
+/// assert in debug builds.
 struct Task {
     static constexpr size_t InlineSize = 128;
 
@@ -62,6 +84,9 @@ struct Task {
     }
     ~Task() { reset(); }
 
+    /// Construct from a callable `void(const Formatter*, std::vector<std::byte>&)`.
+    /// The callable is moved into the Task; its captured state must survive
+    /// until the transport invokes the Task.
     template <
         typename F,
         typename = std::enable_if_t<
@@ -83,8 +108,14 @@ struct Task {
         vtable_ = &VirtualTable<T>;
     }
 
+    /// True if the Task holds a callable. An empty Task is a flush sentinel
+    /// and must not be invoked.
     explicit operator bool() const noexcept { return vtable_; }
+
+    /// Invoke the stored callable. The Formatter is used to render the
+    /// message into `data`. Must not be called on an empty Task.
     void operator()(const interface::Formatter *formatter, std::vector<std::byte> &data) const {
+        assert(vtable_ && "empty Task must not be invoked");
         vtable_->invoke(ptr(), formatter, data);
     }
 
@@ -175,8 +206,20 @@ const Task::VTable Task::VirtualTable{
     },
 };
 
+/// Front-end entry point. `Log<L, BE>` constructs a Task capturing the
+/// format string and arguments, then hands it to `BE`. The formatting itself
+/// happens later on the transport thread.
+///
+/// Level filtering:
+///   - If LIG_LOGGER_LEVEL >= 1 and L is below Info (or >= 2 and below Warn),
+///     the call is compiled out.
+///   - Otherwise `g_level` is checked at runtime and low-level calls return
+///     without creating a Task.
 template <Level L, typename BE> class Log {
   public:
+    /// Emit a log record. Accepts any `std::format`-style format string.
+    /// The format string and arguments are captured; formatting is deferred
+    /// until the transport invokes the Task.
     template <typename... Args>
     void operator()(const std::format_string<Args...> &format, Args &&...args) {
         if constexpr ((LIG_LOGGER_LEVEL == 1 &&
@@ -216,6 +259,7 @@ template <Level L, typename BE> class Log {
         getBackend<BE>().submit(std::move(task));
     }
 
+    /// `std::source_location` defaults to the caller; do not pass it manually.
     Log(std::source_location &&loc = std::source_location::current()) : loc_{loc} {}
     Log(const Log &) = delete;
     Log(Log &&) = delete;
@@ -225,6 +269,9 @@ template <Level L, typename BE> class Log {
   private:
     std::source_location loc_{};
 };
+
+// Convenience aliases so call sites read `lig::Info{}("...")` instead of
+// spelling out the template parameters.
 template <typename BE> using Trace = Log<Level::Trace, BE>;
 template <typename BE> using Debug = Log<Level::Debug, BE>;
 template <typename BE> using Info = Log<Level::Info, BE>;
@@ -233,5 +280,3 @@ template <typename BE> using Error = Log<Level::Error, BE>;
 template <typename BE> using Fatal = Log<Level::Fatal, BE>;
 
 } // namespace lig::logger
-
-#endif

@@ -1,27 +1,12 @@
-find_package(GTest REQUIRED)
-find_package(Threads REQUIRED)
+function(liglog_add_test name file_name)
+    add_executable(${name} ${CMAKE_CURRENT_SOURCE_DIR}/${file_name}.cpp)
+    target_link_libraries(${name} PRIVATE liglog)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
 
-add_executable(lig_tests
-    test_component.cpp
-    test_logger.cpp
-    test_backend.cpp
-    test_integration.cpp
-    test_performance.cpp
-)
-
-target_include_directories(lig_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_link_libraries(lig_tests PRIVATE
-	liglog
-    GTest::gtest
-    GTest::gtest_main
-    Threads::Threads
-)
-
-target_compile_features(lig_tests PRIVATE cxx_std_20)
-
-include(GoogleTest)
-gtest_discover_tests(lig_tests)
+liglog_add_test(test_interface interface)
+liglog_add_test(test_logger logger)
+liglog_add_test(test_formatter formatter)
+liglog_add_test(test_sink sink)
+liglog_add_test(test_transport transport)
+liglog_add_test(test_lig lig)

@@ -1,43 +1,15 @@
-find_package(benchmark REQUIRED)
-find_package(Threads REQUIRED)
+function(liglog_add_benchmark name)
+    add_executable(${name} ${CMAKE_CURRENT_SOURCE_DIR}/${name}.cpp)
+    target_link_libraries(${name} PRIVATE liglog)
+    target_compile_options(${name} PRIVATE -O2 -DNDEBUG)
+endfunction()
 
-add_executable(bench_liglog bench_liglog.cpp)
-target_include_directories(bench_liglog PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_link_libraries(bench_liglog PRIVATE
-    liglog
-    benchmark::benchmark
-    benchmark::benchmark_main
-    Threads::Threads
-)
-target_compile_features(bench_liglog PRIVATE cxx_std_20)
+liglog_add_benchmark(bench_liglog)
 
-find_package(spdlog QUIET)
-
-if(spdlog_FOUND)
-    add_executable(bench_spdlog bench_spdlog.cpp)
-    target_link_libraries(bench_spdlog PRIVATE
-        spdlog::spdlog
-        benchmark::benchmark
-        benchmark::benchmark_main
-        Threads::Threads
-    )
-    target_compile_features(bench_spdlog PRIVATE cxx_std_17)
-else()
-    message(STATUS "spdlog not found, skipping bench_spdlog")
+# spdlog benchmark: only built when the spdlog target is available.
+find_package(spdlog CONFIG REQUIRED)
+if(TARGET spdlog::spdlog)
+    add_executable(bench_spdlog ${CMAKE_CURRENT_SOURCE_DIR}/bench_spdlog.cpp)
+    target_link_libraries(bench_spdlog PRIVATE spdlog::spdlog)
+    target_compile_options(bench_spdlog PRIVATE -O2 -DNDEBUG)
 endif()
-
-
-add_executable(bench_throughput bench_throughput.cpp)
-target_include_directories(bench_throughput PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_link_libraries(bench_throughput PRIVATE
-    liglog
-    spdlog::spdlog
-    Threads::Threads
-)
-target_compile_features(bench_throughput PRIVATE cxx_std_20)

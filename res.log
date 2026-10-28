@@ -1,0 +1,73 @@
+==> liglog
+Benchmark                                      Time(ns)          Ops        Items/s
+------------------------------------------------------------------------------------
+FrontendSuppressed                                 2.15      1000000        465.16M
+FrontendEnabled_NoArgs                            23.20       200000         43.10M
+FrontendEnabled_IntArg                            22.47       100000         44.51M
+FrontendEnabled_MixedArgs                         22.52        50000         44.40M
+SyncTransportFrom                                  7.49       500000        133.43M
+AsyncTransportFrom                                91.48       200000         10.93M
+AsyncTransportFromFlush                          312.16       100000          3.20M
+EndToEnd_Sync_Minimal                             23.17       100000         43.17M
+EndToEnd_Async                                    23.12       100000         43.25M
+MultiThread_Sync/threads:1                        29.72       200000         33.65M
+MultiThread_Sync/threads:2                        14.53       400000         68.83M
+MultiThread_Sync/threads:4                         7.95       800000        125.84M
+MultiThread_Sync/threads:8                         2.96      1600000        338.17M
+MultiThread_Async/threads:1                       26.46       200000         37.80M
+MultiThread_Async/threads:2                       13.81       400000         72.42M
+MultiThread_Async/threads:4                        7.34       800000        136.18M
+MultiThread_Async/threads:8                        2.73      1600000        365.77M
+TextFormatter_Full                               168.61       200000          5.93M
+TextFormatter_Minimal                              9.66       500000        103.56M
+DataBufferPush                                     5.27       200000        189.90M
+FileSink_Write                                   494.69       100000          2.02M
+MixedWorkload                                     60.67       100000         16.48M
+
+==> spdlog
+Benchmark                                      Time(ns)          Ops        Items/s
+------------------------------------------------------------------------------------
+FrontendSuppressed                                 2.14      1000000        467.57M
+FrontendEnabled_NoArgs                            31.18       200000         32.08M
+FrontendEnabled_IntArg                            48.22       100000         20.74M
+FrontendEnabled_MixedArgs                         86.31        50000         11.59M
+SyncTransportFrom                                 31.19       500000         32.06M
+AsyncTransportFrom                               271.88       200000          3.68M
+AsyncTransportFromFlush                          467.09       100000          2.14M
+EndToEnd_Sync_Minimal                            429.31       100000          2.33M
+EndToEnd_Async                                   760.08       100000          1.32M
+MultiThread_Sync/threads:1                       447.28       200000          2.24M
+MultiThread_Sync/threads:2                       759.46       400000          1.32M
+MultiThread_Sync/threads:4                       857.13       800000          1.17M
+MultiThread_Sync/threads:8                       866.45      1600000          1.15M
+MultiThread_Async/threads:1                      810.49       200000          1.23M
+MultiThread_Async/threads:2                     1106.57       400000          0.90M
+MultiThread_Async/threads:4                     1156.57       800000          0.86M
+MultiThread_Async/threads:8                     1126.20      1600000          0.89M
+TextFormatter_Full                                76.38       200000         13.09M
+TextFormatter_Minimal                             12.06       500000         82.90M
+MixedWorkload                                   1510.39       100000          0.66M
+
+==> comparison
+scenario                                 liglog(ns)   spdlog(ns)   spdlog/liglog
+--------------------------------------------------------------------------------
+FrontendSuppressed                             2.15         2.14           1.00x
+FrontendEnabled_NoArgs                        23.20        31.18           1.34x
+FrontendEnabled_IntArg                        22.47        48.22           2.15x
+FrontendEnabled_MixedArgs                     22.52        86.31           3.83x
+SyncTransportFrom                              7.49        31.19           4.16x
+AsyncTransportFrom                            91.48       271.88           2.97x
+AsyncTransportFromFlush                      312.16       467.09           1.50x
+EndToEnd_Sync_Minimal                         23.17       429.31          18.53x
+EndToEnd_Async                                23.12       760.08          32.88x
+MultiThread_Sync/threads:1                    29.72       447.28          15.05x
+MultiThread_Sync/threads:2                    14.53       759.46          52.27x
+MultiThread_Sync/threads:4                     7.95       857.13         107.82x
+MultiThread_Sync/threads:8                     2.96       866.45         292.72x
+MultiThread_Async/threads:1                   26.46       810.49          30.63x
+MultiThread_Async/threads:2                   13.81      1106.57          80.13x
+MultiThread_Async/threads:4                    7.34      1156.57         157.57x
+MultiThread_Async/threads:8                    2.73      1126.20         412.53x
+TextFormatter_Full                           168.61        76.38           0.45x
+TextFormatter_Minimal                          9.66        12.06           1.25x
+MixedWorkload                                 60.67      1510.39          24.90x

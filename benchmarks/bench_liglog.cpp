@@ -1,451 +1,354 @@
-#include <benchmark/benchmark.h>
+// Benchmark suite for liglog, without any external framework.
+//
+// Coverage:
+//   - FrontendSuppressed            : level filter drops the call
+//   - FrontendEnabled_NoArgs        : Info with no args, null transport
+//   - FrontendEnabled_IntArg        : Info with one int
+//   - FrontendEnabled_MixedArgs     : Info with mixed args
+//   - SyncTransportFrom             : SyncTransport::from, null sink
+//   - AsyncTransportFrom            : AsyncTransport::from, null sink
+//   - AsyncTransportFromFlush       : AsyncTransport::from + flush
+//   - EndToEnd_Sync_Minimal         : full Config, sync, console sink
+//   - EndToEnd_Async                : full Config, async, console sink
+//   - MultiThread_Sync_N            : N threads through sync transport
+//   - MultiThread_Async_N           : N threads through async transport
+//   - TextFormatter_Full            : TextFormatter with all header fields
+//   - TextFormatter_Minimal         : TextFormatter with only level
+//   - DataBufferPush                : DataBuffer::push, 64-byte chunks
+//   - FileSink_Write                : FileSink::write, 64-byte chunks
+//   - MixedWorkload                 : mix of levels and args
+//
+// Console sinks write to stderr so the benchmark table on stdout stays
+// readable; run with `./bench_liglog 2>/dev/null` to silence log output.
 
-#include <atomic>
+#include "bench_help.hpp"
+#include "lig.hpp"
+
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "bench_common.hpp"
-#include "lig.hpp"
-
-namespace fs = std::filesystem;
-using namespace lig;
-
-// ============================================================
-// 工具：构造不同级别的 logger 实例，避免每次 benchmark 里重复声明
-// ============================================================
 namespace {
 
-auto temp_file(const std::string &name) -> fs::path {
-    auto dir = fs::temp_directory_path() / "lig_bench";
-    fs::create_directories(dir);
-    return dir / name;
+// ---------------------------------------------------------------------------
+// Test sinks and formatters
+// ---------------------------------------------------------------------------
+
+struct NullSink final : lig::interface::Sink {
+    auto write(const void *, size_t len) -> WriteRes final {
+        WriteRes r{};
+        r.len = len;
+        return r;
+    }
+    auto is_valid() const noexcept -> bool final { return true; }
+};
+
+struct NullFormatter final : lig::interface::Formatter {
+    void format(const lig::LogEntry &, std::vector<std::byte> &) const final {}
+};
+
+// Each benchmark scenario gets a distinct backend type, so the singleton
+// `getBackend<>()` does not share configuration between scenarios.
+template <typename Tag> struct BenchBackend : lig::interface::IBackend<BenchBackend<Tag>> {
+    friend struct lig::interface::IBackend<BenchBackend<Tag>>;
+
+    lig::InnerBackend inner;
+
+    void submit_impl(lig::logger::Task &&task) { inner.submit(std::move(task)); }
+};
+
+using FrontendBE = BenchBackend<struct FrontendTag>;
+using EndToEndSyncBE = BenchBackend<struct EndToEndSyncTag>;
+using EndToEndAsyncBE = BenchBackend<struct EndToEndAsyncTag>;
+using MultiSyncBE = BenchBackend<struct MultiSyncTag>;
+using MultiAsyncBE = BenchBackend<struct MultiAsyncTag>;
+
+void setup_null_sync(lig::InnerBackend &inner) {
+    std::unique_ptr<const lig::interface::Formatter> formatter = std::make_unique<NullFormatter>();
+    std::vector<std::unique_ptr<lig::interface::Sink>> sinks;
+    sinks.push_back(std::make_unique<NullSink>());
+    inner.add_entity(lig::interface::ITransport::Kind::Sync, formatter, sinks, 0);
+    inner.start();
 }
 
-// 让文件 sink 每 N 次 sync 一次，与生产配置接近
-constexpr size_t kFileSyncInterval = 4096;
+void setup_real_sync(lig::InnerBackend &inner) {
+    std::unique_ptr<const lig::interface::Formatter> formatter =
+        std::make_unique<lig::component::TextFormatter>();
+    std::vector<std::unique_ptr<lig::interface::Sink>> sinks;
+    sinks.push_back(std::make_unique<lig::component::ConsoleSink>(
+        lig::component::ConsoleSink::Config{.to_err = true}));
+    inner.add_entity(lig::interface::ITransport::Kind::Sync, formatter, sinks, 0);
+    inner.start();
+}
+
+void setup_real_async(lig::InnerBackend &inner) {
+    std::unique_ptr<const lig::interface::Formatter> formatter =
+        std::make_unique<lig::component::TextFormatter>();
+    std::vector<std::unique_ptr<lig::interface::Sink>> sinks;
+    sinks.push_back(std::make_unique<lig::component::ConsoleSink>(
+        lig::component::ConsoleSink::Config{.to_err = true}));
+    inner.add_entity(lig::interface::ITransport::Kind::Async, formatter, sinks, 0);
+    inner.start();
+}
+
+std::filesystem::path temp_dir(const std::string &name) {
+    auto p = std::filesystem::temp_directory_path() / name;
+    std::filesystem::remove_all(p);
+    std::filesystem::create_directories(p);
+    return p;
+}
+
+lig::logger::Task null_task() {
+    return [](const lig::interface::Formatter *, std::vector<std::byte> &) {};
+}
 
 } // namespace
 
-// ============================================================
-// 1. 前端延迟（单线程，无 I/O）
-//    - 用 InnerBackend 的虚调用开销 + std::format 打包
-//    - 关注 ns/op 增长曲线
-// ============================================================
+// ---------------------------------------------------------------------------
+// Front-end. Null transport, so the numbers reflect the front-end cost plus
+// Task construction and destruction.
+// ---------------------------------------------------------------------------
 
-// 1.1 被 level 过滤：应近似常数，与格式化参数无关
-static void BM_FrontendSuppressed(benchmark::State &state) {
-    logger::g_level.store(Level::Fatal, std::memory_order_relaxed);
-    lig::Info logger;
-    for (auto _ : state) {
-        logger("payload {}", 42);
-        benchmark::DoNotOptimize(logger);
-    }
-    state.SetItemsProcessed(state.iterations());
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
+void bench_frontend_suppressed() {
+    lig::logger::g_level.store(lig::Level::Fatal, std::memory_order_relaxed);
+    lig::Info logger{};
+    bench::print_result(bench::run_bench("FrontendSuppressed", 1'000'000, [&] {
+        logger("hello, world");
+        bench::do_not_optimize(logger);
+    }));
+    lig::logger::g_level.store(lig::Level::Trace, std::memory_order_relaxed);
 }
-BENCHMARK(BM_FrontendSuppressed)->Unit(benchmark::kNanosecond);
 
-// 1.2 启用，无参数
-static void BM_FrontendEnabled_NoArgs(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
-    be.start();
-
-    Info log;
-    for (auto _ : state) {
-        log("hello");
-    }
-    state.SetItemsProcessed(state.iterations());
-
-    be.flush();
-    be.stop();
+void bench_frontend_enabled_no_args() {
+    lig::logger::g_level.store(lig::Level::Trace, std::memory_order_relaxed);
+    lig::Info logger{};
+    bench::print_result(bench::run_bench("FrontendEnabled_NoArgs", 200'000, [&] {
+        logger("hello, world");
+        bench::do_not_optimize(logger);
+    }));
 }
-BENCHMARK(BM_FrontendEnabled_NoArgs)->Unit(benchmark::kNanosecond);
 
-// 1.3 启用，单 int 参数
-static void BM_FrontendEnabled_IntArg(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
-    be.start();
-
-    Info log;
-    for (auto _ : state) {
-        log("value={}", 42);
-    }
-    state.SetItemsProcessed(state.iterations());
-
-    be.flush();
-    be.stop();
+void bench_frontend_enabled_int_arg() {
+    lig::logger::g_level.store(lig::Level::Trace, std::memory_order_relaxed);
+    lig::Info logger{};
+    bench::print_result(bench::run_bench("FrontendEnabled_IntArg", 100'000, [&] {
+        logger("value = {}", 42);
+        bench::do_not_optimize(logger);
+    }));
 }
-BENCHMARK(BM_FrontendEnabled_IntArg)->Unit(benchmark::kNanosecond);
 
-// 1.4 启用，混合参数（int + double + string）
-static void BM_FrontendEnabled_MixedArgs(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
-    be.start();
-
-    const std::string name = "user_id";
-    Info log;
-    for (auto _ : state) {
-        log("{}: id={} score={:.2f}", name, 42, 3.14);
-    }
-    state.SetItemsProcessed(state.iterations());
-
-    be.flush();
-    be.stop();
+void bench_frontend_enabled_mixed_args() {
+    lig::logger::g_level.store(lig::Level::Trace, std::memory_order_relaxed);
+    lig::Info logger{};
+    bench::print_result(bench::run_bench("FrontendEnabled_MixedArgs", 50'000, [&] {
+        logger("v={} f={} s={}", 42, 3.14, "abc");
+        bench::do_not_optimize(logger);
+    }));
 }
-BENCHMARK(BM_FrontendEnabled_MixedArgs)->Unit(benchmark::kNanosecond);
 
-// ============================================================
-// 2. 单线程传输提交（Sync vs Async）
-// ============================================================
+// ---------------------------------------------------------------------------
+// Transport layer. Bypass the front-end and call `from` directly on a
+// transport with a null formatter and a null sink.
+// ---------------------------------------------------------------------------
 
-// 2.1 SyncTransport::from
-static void BM_SyncTransportFrom(benchmark::State &state) {
-    std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_bench::NullSink>();
-    lig::component::SyncTransport t;
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    t.set_formatter(fmt);
+void bench_sync_transport_from() {
+    lig::component::SyncTransport t{};
+    std::unique_ptr<const lig::interface::Formatter> formatter = std::make_unique<NullFormatter>();
+    t.set_formatter(formatter);
+    std::unique_ptr<lig::interface::Sink> sink = std::make_unique<NullSink>();
     t.add_sink(sink);
-    t.flush();
-
-    auto make_task = [](std::string body) -> logger::Task {
-        return ([body = std::move(body)](const interface::Formatter *f,
-                                         std::vector<std::byte> &vec) -> void {
-            LogEntry entry;
-            entry.head.level = Level::Info;
-            entry.body = body;
-            f->format(entry, vec);
-        });
-    };
-
-    for (auto _ : state) {
-        t.from(make_task("payload"));
-    }
-    state.SetItemsProcessed(state.iterations());
-    t.flush();
+    auto task = null_task();
+    bench::print_result(bench::run_bench("SyncTransportFrom", 500'000, [&] { t.from(task); }));
 }
-BENCHMARK(BM_SyncTransportFrom)->Unit(benchmark::kNanosecond);
 
-// 2.2 AsyncTransport::from
-static void BM_AsyncTransportFrom(benchmark::State &state) {
-    std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_bench::NullSink>();
-    lig::component::AsyncTransport t;
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    t.set_formatter(fmt);
+void bench_async_transport_from() {
+    lig::component::AsyncTransport t{};
+    std::unique_ptr<const lig::interface::Formatter> formatter = std::make_unique<NullFormatter>();
+    t.set_formatter(formatter);
+    std::unique_ptr<lig::interface::Sink> sink = std::make_unique<NullSink>();
     t.add_sink(sink);
     t.start();
-
-    auto make_task = [](std::string body) {
-        return logger::Task([body = std::move(body)](const interface::Formatter *f,
-                                                     std::vector<std::byte> &vec) -> void {
-            LogEntry entry;
-            entry.head.level = Level::Info;
-            entry.body = body;
-            f->format(entry, vec);
-        });
-    };
-
-    for (auto _ : state) {
-        t.from(make_task("payload"));
-    }
-    state.SetItemsProcessed(state.iterations());
-    t.flush();
+    auto task = null_task();
+    bench::print_result(bench::run_bench("AsyncTransportFrom", 200'000, [&] { t.from(task); }));
     t.stop();
 }
-BENCHMARK(BM_AsyncTransportFrom)->Unit(benchmark::kNanosecond);
 
-// 2.3 AsyncTransport 提交 + flush（每条一次 flush，测最坏情况延迟）
-static void BM_AsyncTransportFromFlush(benchmark::State &state) {
-    std::unique_ptr<lig::interface::Sink> sink = std::make_unique<lig_bench::NullSink>();
-    lig::component::AsyncTransport t;
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    t.set_formatter(fmt);
+void bench_async_transport_from_flush() {
+    lig::component::AsyncTransport t{};
+    std::unique_ptr<const lig::interface::Formatter> formatter = std::make_unique<NullFormatter>();
+    t.set_formatter(formatter);
+    std::unique_ptr<lig::interface::Sink> sink = std::make_unique<NullSink>();
     t.add_sink(sink);
     t.start();
-
-    auto make_task = [](std::string body) {
-        return logger::Task([body = std::move(body)](const interface::Formatter *f,
-                                                     std::vector<std::byte> &vec) -> void {
-            LogEntry entry;
-            entry.head.level = Level::Info;
-            entry.body = body;
-            f->format(entry, vec);
-        });
-    };
-
-    for (auto _ : state) {
-        t.from(make_task("payload"));
+    auto task = null_task();
+    bench::print_result(bench::run_bench("AsyncTransportFromFlush", 100'000, [&] {
+        t.from(task);
         t.flush();
-    }
-    state.SetItemsProcessed(state.iterations());
+    }));
     t.stop();
 }
-BENCHMARK(BM_AsyncTransportFromFlush)->Unit(benchmark::kNanosecond);
 
-// ============================================================
-// 3. 端到端（含格式化 + 落地）
-// ============================================================
+// ---------------------------------------------------------------------------
+// End-to-end. Full Config with real formatter and a console sink on stderr.
+// ---------------------------------------------------------------------------
 
-// 3.1 Sync 端到端：Task 构造 → transport → Sink
-static void BM_EndToEnd_Sync_Minimal(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    auto *sink_raw = sink.get();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
-    be.start();
-
-    Info log;
-    for (auto _ : state) {
-        log("value={}", 42);
-    }
-    be.flush();
-
-    state.SetItemsProcessed(state.iterations());
-    state.counters["bytes"] = benchmark::Counter(static_cast<double>(sink_raw->bytes.load()),
-                                                 benchmark::Counter::kIsRate);
-    be.stop();
+void bench_end_to_end_sync_minimal() {
+    setup_real_sync(lig::logger::getBackend<EndToEndSyncBE>().inner);
+    lig::Info logger{};
+    bench::print_result(
+        bench::run_bench("EndToEnd_Sync_Minimal", 100'000, [&] { logger("hello, world"); }));
 }
-BENCHMARK(BM_EndToEnd_Sync_Minimal)->Unit(benchmark::kNanosecond);
 
-// 3.2 Async 端到端
-static void BM_EndToEnd_Async(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Async, fmt, sinks, 16 * 1024);
-    be.start();
-
-    Info log;
-    for (auto _ : state) {
-        log("value={}", 42);
-    }
-    be.flush();
-    be.stop();
-
-    state.SetItemsProcessed(state.iterations());
+void bench_end_to_end_async() {
+    setup_real_async(lig::logger::getBackend<EndToEndAsyncBE>().inner);
+    lig::Info logger{};
+    auto result = bench::run_bench("EndToEnd_Async", 100'000, [&] { logger("hello, world"); });
+    lig::logger::getBackend<EndToEndAsyncBE>().inner.flush();
+    bench::print_result(result);
 }
-BENCHMARK(BM_EndToEnd_Async)->Unit(benchmark::kNanosecond);
 
-// 3.3 完整 TextFormatter + 文件落地
-static void BM_EndToEnd_Sync_FileFull(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
+// ---------------------------------------------------------------------------
+// Multi-threaded. ns/op is total wall-clock / total ops across all threads.
+// ---------------------------------------------------------------------------
 
-    auto cfg = component::FileSink::Config{};
-    cfg.dir = fs::temp_directory_path() / "lig_bench";
-    cfg.file = "full.log";
-    cfg.sync_interval = 0; // benchmark 里禁用 sync，专注吞吐
-    cfg.max_file_size = component::FileSink::MaxFileSize;
-    fs::create_directories(cfg.dir);
-
-    auto sink = std::make_unique<component::FileSink>(cfg);
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_full_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 64 * 1024);
-    be.start();
-
-    Info log;
-    for (auto _ : state) {
-        log("user {} did action {} at {}", 42, "login", 3.14);
+void bench_multi_thread_sync(std::size_t num_threads) {
+    static bool configured = false;
+    if (!configured) {
+        setup_real_sync(lig::logger::getBackend<MultiSyncBE>().inner);
+        configured = true;
     }
-    be.flush();
-    be.stop();
-
-    state.SetItemsProcessed(state.iterations());
+    lig::Info logger{};
+    const std::string name = "MultiThread_Sync/threads:" + std::to_string(num_threads);
+    bench::print_result(
+        bench::run_bench_mt(name, 200'000, num_threads, [&] { logger("hello, world"); }));
 }
-BENCHMARK(BM_EndToEnd_Sync_FileFull)->Unit(benchmark::kNanosecond);
 
-// ============================================================
-// 4. 多线程扩展性
-// ============================================================
-
-// 4.1 Async 多线程提交
-static void BM_MultiThread_Async(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Async, fmt, sinks, 16 * 1024);
-    be.start();
-
-    for (auto _ : state) {
-        Info log;
-        log("value={}", 42);
+void bench_multi_thread_async(std::size_t num_threads) {
+    static bool configured = false;
+    if (!configured) {
+        setup_real_async(lig::logger::getBackend<MultiAsyncBE>().inner);
+        configured = true;
     }
-    state.SetItemsProcessed(state.iterations() * state.threads());
-    be.flush();
-    be.stop();
+    lig::Info logger{};
+    const std::string name = "MultiThread_Async/threads:" + std::to_string(num_threads);
+    auto result = bench::run_bench_mt(name, 200'000, num_threads, [&] { logger("hello, world"); });
+    lig::logger::getBackend<MultiAsyncBE>().inner.flush();
+    bench::print_result(result);
 }
-BENCHMARK(BM_MultiThread_Async)
-    ->Unit(benchmark::kNanosecond)
-    ->Threads(1)
-    ->Threads(2)
-    ->Threads(4)
-    ->Threads(8)
-    ->UseRealTime();
 
-// 4.2 Sync 多线程提交
-static void BM_MultiThread_Sync(benchmark::State &state) {
-    logger::g_level.store(Level::Trace, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Sync, fmt, sinks, 16 * 1024);
-    be.start();
+// ---------------------------------------------------------------------------
+// Component micro-benchmarks.
+// ---------------------------------------------------------------------------
 
-    for (auto _ : state) {
-        Info log;
-        log("value={}", 42);
-    }
-    state.SetItemsProcessed(state.iterations() * state.threads());
-    be.flush();
-    be.stop();
-}
-BENCHMARK(BM_MultiThread_Sync)
-    ->Unit(benchmark::kNanosecond)
-    ->Threads(1)
-    ->Threads(2)
-    ->Threads(4)
-    ->Threads(8)
-    ->UseRealTime();
-
-// ============================================================
-// 5. 组件级
-// ============================================================
-
-// 5.1 纯 TextFormatter（full status）
-static void BM_TextFormatter_Full(benchmark::State &state) {
-    auto fmt = lig_bench::make_full_formatter();
-    LogEntry entry;
-    entry.head.level = Level::Info;
-    entry.head.line = 42;
-    entry.head.thread_id = 12345;
-    entry.head.filename = "file.cpp";
-    entry.head.funcname = "func";
-    entry.head.now =
-        std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
-    entry.body = "hello world";
-
+void bench_text_formatter_full() {
+    lig::component::TextFormatter fmt{};
+    lig::LogEntry e{};
+    e.head.level = lig::Level::Info;
+    e.head.line = 42;
+    e.head.thread_id = 1234;
+    e.head.filename = "bench_liglog.cpp";
+    e.head.funcname = "bench";
+    e.head.now = std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
+    e.body = "hello, world";
     std::vector<std::byte> buf;
-    buf.reserve(512);
-    for (auto _ : state) {
+    buf.reserve(256);
+    bench::print_result(bench::run_bench("TextFormatter_Full", 200'000, [&] {
         buf.clear();
-        fmt->format(entry, buf);
-        benchmark::DoNotOptimize(buf.data());
-    }
-    state.SetItemsProcessed(state.iterations());
+        fmt.format(e, buf);
+        bench::do_not_optimize(buf.size());
+    }));
 }
-BENCHMARK(BM_TextFormatter_Full)->Unit(benchmark::kNanosecond);
 
-// 5.2 纯 TextFormatter（minimal）
-static void BM_TextFormatter_Minimal(benchmark::State &state) {
-    auto fmt = lig_bench::make_minimal_formatter();
-    LogEntry entry;
-    entry.head.level = Level::Info;
-    entry.body = "hello world";
-
+void bench_text_formatter_minimal() {
+    lig::component::TextFormatter fmt{};
+    fmt.status.setTimeStamp(false).setThreadId(false).setFuncname(false).setLocation(false);
+    lig::LogEntry e{};
+    e.head.level = lig::Level::Info;
+    e.body = "hello, world";
     std::vector<std::byte> buf;
-    buf.reserve(128);
-    for (auto _ : state) {
+    buf.reserve(64);
+    bench::print_result(bench::run_bench("TextFormatter_Minimal", 500'000, [&] {
         buf.clear();
-        fmt->format(entry, buf);
-        benchmark::DoNotOptimize(buf.data());
-    }
-    state.SetItemsProcessed(state.iterations());
+        fmt.format(e, buf);
+        bench::do_not_optimize(buf.size());
+    }));
 }
-BENCHMARK(BM_TextFormatter_Minimal)->Unit(benchmark::kNanosecond);
 
-// 5.3 DataBuffer::push
-static void BM_DataBufferPush(benchmark::State &state) {
-    component::internal::DataBuffer buf;
-    std::vector<std::byte> chunk(128, std::byte{0x42});
-    for (auto _ : state) {
-        auto res = buf.push(chunk.data(), chunk.size());
-        benchmark::DoNotOptimize(res);
-    }
-    state.SetItemsProcessed(state.iterations());
+void bench_data_buffer_push() {
+    lig::component::internal::DataBuffer db{};
+    std::vector<std::byte> chunk(64, std::byte{0x41});
+    bench::print_result(bench::run_bench("DataBufferPush", 200'000, [&] {
+        auto blocks = db.push(chunk.data(), chunk.size());
+        bench::do_not_optimize(blocks.size());
+    }));
 }
-BENCHMARK(BM_DataBufferPush)->Unit(benchmark::kNanosecond);
 
-// 5.4 FileSink 写入（512B 块）
-static void BM_FileSink_Write(benchmark::State &state) {
-    auto dir = fs::temp_directory_path() / "lig_bench";
-    fs::create_directories(dir);
-    component::FileSink::Config cfg;
+void bench_file_sink_write() {
+    const auto dir = temp_dir("liglog_bench_file_sink");
+    lig::component::FileSink::Config cfg{};
     cfg.dir = dir;
-    cfg.file = "sink_write.log";
+    cfg.file = "bench.log";
+    cfg.max_file_size = lig::component::FileSink::MaxFileSize;
     cfg.sync_interval = 0;
-    cfg.max_file_size = component::FileSink::MaxFileSize;
-
-    component::FileSink sink{cfg};
+    lig::component::FileSink sink{cfg};
     sink.open();
-    std::string chunk(512, 'x');
-    for (auto _ : state) {
+    std::vector<std::byte> chunk(64, std::byte{0x41});
+    bench::print_result(bench::run_bench("FileSink_Write", 100'000, [&] {
         auto res = sink.write(chunk.data(), chunk.size());
-        benchmark::DoNotOptimize(res);
-    }
-    state.SetItemsProcessed(state.iterations());
-    state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
-                            static_cast<int64_t>(chunk.size()));
+        bench::do_not_optimize(res.len);
+    }));
     sink.close();
+    std::filesystem::remove_all(dir);
 }
-BENCHMARK(BM_FileSink_Write)->Unit(benchmark::kNanosecond);
 
-// ============================================================
-// 6. 混合负载：90% 被过滤 + 10% 启用
-// ============================================================
-static void BM_MixedWorkload(benchmark::State &state) {
-    logger::g_level.store(Level::Info, std::memory_order_relaxed);
-    auto &be = logger::getBackend<InnerBackend>();
-    auto sink = std::make_unique<lig_bench::NullSink>();
-    std::unique_ptr<const interface::Formatter> fmt = lig_bench::make_minimal_formatter();
-    std::vector<std::unique_ptr<interface::Sink>> sinks;
-    sinks.push_back(std::move(sink));
-    be.add_entity(interface::ITransport::Kind::Async, fmt, sinks, 16 * 1024);
-    be.start();
-
-    Trace trace; // 被过滤
-    Info info;   // 启用
-    for (auto _ : state) {
-        for (int i = 0; i < 9; ++i) {
-            trace("debug info {}", i);
-        }
-        info("real log {}", 42);
-    }
-    be.flush();
-    be.stop();
-    state.SetItemsProcessed(state.iterations() * 10);
+void bench_mixed_workload() {
+    // Reuses EndToEndSyncBE; its real sync transport is already configured.
+    lig::Info info{};
+    lig::Warn warn{};
+    lig::Error err{};
+    bench::print_result(bench::run_bench("MixedWorkload", 100'000, [&] {
+        info("info {}", 1);
+        warn("warn {}", 2.0);
+        err("error");
+    }));
 }
-BENCHMARK(BM_MixedWorkload)->Unit(benchmark::kNanosecond);
+
+int main() {
+    // Front-end benchmarks share one null backend.
+    setup_null_sync(lig::logger::getBackend<FrontendBE>().inner);
+
+    bench::print_header();
+
+    bench_frontend_suppressed();
+    bench_frontend_enabled_no_args();
+    bench_frontend_enabled_int_arg();
+    bench_frontend_enabled_mixed_args();
+
+    bench_sync_transport_from();
+    bench_async_transport_from();
+    bench_async_transport_from_flush();
+
+    bench_end_to_end_sync_minimal();
+    bench_end_to_end_async();
+
+    bench_multi_thread_sync(1);
+    bench_multi_thread_sync(2);
+    bench_multi_thread_sync(4);
+    bench_multi_thread_sync(8);
+
+    bench_multi_thread_async(1);
+    bench_multi_thread_async(2);
+    bench_multi_thread_async(4);
+    bench_multi_thread_async(8);
+
+    bench_text_formatter_full();
+    bench_text_formatter_minimal();
+    bench_data_buffer_push();
+    bench_file_sink_write();
+    bench_mixed_workload();
+
+    return 0;
+}
