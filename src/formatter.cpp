@@ -65,7 +65,7 @@ auto createTextFormatter(const component::TextFormatter::Config config)
 // TermFormatter
 TermFormatter::TermFormatter(const Config &config) {
     thread_local ::term_ctl::TermStr term{};
-    status = status;
+    status = config.status;
     for (size_t i = 0; i < LevelCategory; ++i) {
         styleStrs_[i] = term.state(config.states[i]).snapshot();
     }

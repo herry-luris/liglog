@@ -1,4 +1,5 @@
 #include "component/sink.hpp"
+#include <mutex>
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -49,8 +50,8 @@ FileSink::FileSink(const Config &config) {
     if (!set_directory(config.dir)) {
         config_.dir = std::filesystem::current_path();
     }
-    if (set_file(config.file)) {
-        config_.file = get_next_file();
+    if (!set_file(config.file)) {
+        rotate_file_ = get_next_file();
     }
     if (!set_max_file_size(config.max_file_size)) {
         config_.max_file_size = ((MaxFileSize + MinFileSize) / 2);
@@ -62,7 +63,11 @@ FileSink::~FileSink() { close(); }
 
 auto FileSink::is_valid() const noexcept -> bool { return is_valid_; }
 auto FileSink::write(const void *data, size_t len) -> WriteRes {
+    std::scoped_lock guard{mutex_};
     WriteRes total_res{};
+    if (len == 0) {
+        return total_res;
+    }
     size_t eaten = 0;
     while (file_size_ + len >= config_.max_file_size) {
         size_t left = config_.max_file_size - file_size_;
@@ -75,9 +80,9 @@ auto FileSink::write(const void *data, size_t len) -> WriteRes {
         file_size_ += res.len;
         len -= res.len;
         total_res.len += res.len;
-        if (!open()) {
-            res.err = std::error_code{};
-            return res;
+        if (!inner_open()) {
+            total_res.err = std::make_error_code(std::errc::io_error); // 非空 → SinkWrapper 会重试
+            return total_res;
         }
     }
     if (len != 0) {
@@ -90,14 +95,76 @@ auto FileSink::write(const void *data, size_t len) -> WriteRes {
         total_res.len += res.len;
         write_since_sync_++;
         if (config_.sync_interval != 0 && write_since_sync_ == config_.sync_interval) {
-            sync();
+            inner_sync();
         }
     }
     return total_res;
 }
 void FileSink::close() noexcept {
+    std::scoped_lock lock{mutex_};
+    inner_close();
+}
+auto FileSink::open() -> bool {
+    std::scoped_lock lock{mutex_};
+    return inner_open();
+}
+auto FileSink::sync() -> bool {
+    std::scoped_lock lock{mutex_};
+    return inner_sync();
+}
+auto FileSink::size() const noexcept -> size_t { return file_size_; }
+auto FileSink::config() const noexcept -> Config {
+    std::scoped_lock lock{mutex_};
+    return config_;
+}
+auto FileSink::set_directory(const std::filesystem::path &dir) noexcept -> bool {
+    std::scoped_lock lock{mutex_};
+    if (dir.empty()) {
+        config_.dir = std::filesystem::current_path();
+        return true;
+    }
+    if (std::filesystem::exists(dir) && !std::filesystem::is_directory(dir)) {
+        return false;
+    }
+    config_.dir = dir;
+    return true;
+}
+auto FileSink::set_file(const std::filesystem::path &file, bool change_dir) noexcept -> bool {
+    std::scoped_lock lock{mutex_};
+    if (std::filesystem::is_directory(file)) {
+        return false;
+    }
+    config_.file = file;
+    rotate_count_ = 0;
+    if (change_dir) {
+        config_.dir = file.parent_path();
+    }
+    rotate_file_ =
+        config_.file.has_parent_path() ? config_.file : config_.dir / config_.file.filename();
+    return true;
+}
+void FileSink::set_sync_interval(size_t count) noexcept {
+    std::scoped_lock lock{mutex_};
+    config_.sync_interval = count;
+}
+auto FileSink::set_max_file_size(size_t size) noexcept -> bool {
+    std::scoped_lock lock{mutex_};
+    if (size > MaxFileSize || size < MinFileSize) {
+        return false;
+    }
+    config_.max_file_size = size;
+    return true;
+}
+
+auto FileSink::get_next_file() -> std::filesystem::path {
+    rotate_count_++;
+    return config_.dir /
+           std::string{std::format("{}_{}.log", rotate_count_, config_.file.filename().string())};
+}
+
+void FileSink::inner_close() noexcept {
     if (is_valid_) {
-        sync();
+        inner_sync();
 #if defined(_WIN32)
         ::CloseHandle(reinterpret_cast<HANDLE>(fd_));
         is_valid_ = false;
@@ -109,15 +176,17 @@ void FileSink::close() noexcept {
 #endif
     }
 }
-auto FileSink::open() -> bool {
-    close();
-    if (!std::filesystem::exists(config_.file.parent_path())) {
-        if (!std::filesystem::create_directory(config_.file.parent_path())) {
+auto FileSink::inner_open() -> bool {
+    inner_close();
+    if (!rotate_file_.parent_path().empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(rotate_file_.parent_path(), ec);
+        if (ec) {
             return false;
         }
     }
 #if defined(_WIN32)
-    HANDLE f = ::CreateFileW(config_.file.wstring().c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+    HANDLE f = ::CreateFileW(rotate_file_.wstring().c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
         return false;
@@ -131,7 +200,7 @@ auto FileSink::open() -> bool {
     file_size_ = static_cast<uint64_t>(size.QuadPart);
 
 #else
-    const int f = ::open(config_.file.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
+    const int f = ::open(rotate_file_.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
     if (f < 0) {
         return false;
     }
@@ -144,10 +213,10 @@ auto FileSink::open() -> bool {
     file_size_ = s.st_size;
 #endif
     fd_ = f;
-    config_.file = get_next_file();
+    rotate_file_ = get_next_file();
     return true;
 }
-auto FileSink::sync() -> bool {
+auto FileSink::inner_sync() -> bool {
     if (is_valid_) {
 #if defined(_WIN32)
         ::FlushFileBuffers(reinterpret_cast<HANDLE>(fd_));
@@ -159,39 +228,7 @@ auto FileSink::sync() -> bool {
     }
     return false;
 }
-auto FileSink::size() const noexcept -> size_t { return file_size_; }
-auto FileSink::config() const noexcept -> const Config & { return config_; }
-auto FileSink::set_directory(const std::filesystem::path &dir) noexcept -> bool {
-    if (std::filesystem::exists(dir) && !std::filesystem::is_directory(dir)) {
-        return false;
-    }
-    config_.dir = dir;
-    return true;
-}
-auto FileSink::set_file(const std::filesystem::path &file, bool change_dir) noexcept -> bool {
-    if (std::filesystem::is_directory(file)) {
-        return false;
-    }
-    config_.file = file;
-    if (change_dir) {
-        config_.dir = file.parent_path();
-    }
-    return true;
-}
-void FileSink::set_sync_interval(size_t count) noexcept { config_.sync_interval = count; }
-auto FileSink::set_max_file_size(size_t size) noexcept -> bool {
-    if (size > MaxFileSize || size < MinFileSize) {
-        return false;
-    }
-    config_.max_file_size = size;
-    return true;
-}
 
-auto FileSink::get_next_file() noexcept -> std::filesystem::path {
-    rotate_count_++;
-    return config_.dir / std::string{std::format("{}_lig{}.log", rotate_count_,
-                                                 config_.file.filename().string())};
-}
 auto createFileSink(const component::FileSink::Config &config)
     -> std::unique_ptr<::lig::interface::Sink> {
     auto sink = std::make_unique<component::FileSink>(config);
@@ -228,7 +265,7 @@ void ConsoleSink::close() noexcept {
     fd_ = -1;
 #endif
 }
-auto createConsoleSink(const component::ConsoleSink::Config &config )
+auto createConsoleSink(const component::ConsoleSink::Config &config)
     -> std::unique_ptr<::lig::interface::Sink> {
     auto sink = std::make_unique<component::ConsoleSink>(config);
     return std::move(sink);

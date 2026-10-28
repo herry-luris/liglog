@@ -22,7 +22,7 @@ namespace term_ctl {
 // };
 
 // clang-format off
-enum struct ColorMode { Default ,Color16, Color256, TrueColor };
+enum struct ColorMode: uint8_t { Default ,Color16, Color256, TrueColor };
 struct TrueColor { uint8_t r{}, g{}, b{}; };
 enum struct Color16 : uint8_t {
 	Black = 30, Red, Green, Yellow, Blue, Fuchsia, Cyan, White,
@@ -63,7 +63,7 @@ class Color {
     };
 
   public:
-    enum struct Type { Foreground, Background, Underline };
+    enum struct Type: uint8_t { Foreground, Background, Underline };
 
     auto mode() const noexcept -> ColorMode { return m_; }
     auto as_color16() const noexcept -> std::optional<Color16> {
@@ -231,7 +231,7 @@ class TermStr {
 
 #define BoolSetting(method, var, order)                                                        \
     auto method(bool enable = true) noexcept -> TermStr & {                                    \
-        var = enable;                                                                          \
+        (var) = (enable);                                                                          \
         in(order);                                                                             \
         return *this;                                                                          \
     }
@@ -246,7 +246,7 @@ class TermStr {
 
 #define ColorSetting(method, var, type, order)                                                 \
     auto method(type color) noexcept -> TermStr & {                                            \
-        var.set_value(color);                                                                  \
+        (var).set_value(color);                                                                  \
         in(order);                                                                             \
         return *this;                                                                          \
     }
@@ -263,7 +263,7 @@ class TermStr {
 
 #define MethodSetting(method, var, type, order)                                                \
     auto method(type value) noexcept -> TermStr & {                                            \
-        var = value;                                                                           \
+        (var) = value;                                                                           \
         in(order);                                                                             \
         return *this;                                                                          \
     }
@@ -356,7 +356,7 @@ class TermStr {
     uint8_t len_{};
 
     void in(Order order) {
-        const uint16_t mask = static_cast<uint16_t>(order);
+        const auto mask = static_cast<uint16_t>(order);
         if (dirty & mask) {
             for (uint8_t i = 0; i < len_; ++i) {
                 if (orders_[i] == order) {
