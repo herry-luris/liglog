@@ -15,7 +15,6 @@
 //   - TextFormatter_Full            : TextFormatter with all header fields
 //   - TextFormatter_Minimal         : TextFormatter with only level
 //   - DataBufferPush                : DataBuffer::push, 64-byte chunks
-//   - FileSink_Write                : FileSink::write, 64-byte chunks
 //   - MixedWorkload                 : mix of levels and args
 //
 // Console sinks write to stderr so the benchmark table on stdout stays
@@ -286,24 +285,6 @@ void bench_data_buffer_push() {
     }));
 }
 
-void bench_file_sink_write() {
-    const auto dir = temp_dir("liglog_bench_file_sink");
-    lig::component::FileSink::Config cfg{};
-    cfg.dir = dir;
-    cfg.file = "bench.log";
-    cfg.max_file_size = lig::component::FileSink::MaxFileSize;
-    cfg.sync_interval = 0;
-    lig::component::FileSink sink{cfg};
-    sink.open();
-    std::vector<std::byte> chunk(64, std::byte{0x41});
-    bench::print_result(bench::run_bench("FileSink_Write", 100'000, [&] {
-        auto res = sink.write(chunk.data(), chunk.size());
-        bench::do_not_optimize(res.len);
-    }));
-    sink.close();
-    std::filesystem::remove_all(dir);
-}
-
 void bench_mixed_workload() {
     // Reuses EndToEndSyncBE; its real sync transport is already configured.
     lig::Info info{};
@@ -347,7 +328,6 @@ int main() {
     bench_text_formatter_full();
     bench_text_formatter_minimal();
     bench_data_buffer_push();
-    bench_file_sink_write();
     bench_mixed_workload();
 
     return 0;

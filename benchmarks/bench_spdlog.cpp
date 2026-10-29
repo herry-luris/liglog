@@ -266,5 +266,6 @@ int main() {
     bench_text_formatter_minimal();
     bench_mixed_workload();
 
+	spdlog::shutdown();
     return 0;
 }

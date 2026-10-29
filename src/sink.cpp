@@ -261,6 +261,7 @@ auto ConsoleSink::write(const void *data, size_t len) -> WriteRes {
 void ConsoleSink::close() noexcept {
 #if defined(_WIN32)
     ::CloseHandle(reinterpret_cast<HANDLE>(fd_));
+	fd_ = nullptr;
 #else
     fd_ = -1;
 #endif
